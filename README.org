@@ -1,0 +1,149 @@
+#+AUTHOR: joinr
+#+TITLE:  Exploring JDK 15 BiasedLocking Deprecation Impacts on Clojure
+
+* Background
+It turns out that there's been a change in Java 15, referenced in this [[https://www.reddit.com/r/Clojure/comments/itvix9/jdk_15_released/][r/clojure
+reddit thread]] that disables a relatively ancient feature called BiasedLocking.
+User pron98 mentioned the possibility that the JVM Clojure implementation may be
+susceptible to the deprecation of this feaure and subsequently incur a
+performance hit. Perhaps this would necessitate changes to data structure
+implementations if the hit is bad enough. The conversation focused on lazy
+sequences as a likely indicator of performance regression.
+* Method
+
+Rather than speculate, we can go measure. To wit, I put together this small
+project that can be run as an uberjar. The core measurement is just reducing
+over a lazy sequence, arbitarily chosen to be 10^5 entries:
+
+#+BEGIN_SRC clojure
+(defn seq-smash []
+  (reduce + (seq (range 100000))))
+#+END_SRC
+
+The eager reduction of the lazy sequence will hopefully provide a useful
+indicator of possible performance regression, if lazy sequences alone are a
+prime target for regression.
+
+User bsless pointed out that there are likely performance regressions between
+g1gc (the default gc after Java 9) and Java 8's parallel gc default.  Being
+primarily a Java 8 target, I did not think of this originally, so I have
+included ~UseParallelGC~ as a factor in the experimental design.  So we will
+explore performance on my legacy JDK 8, and the most current JDK 15, along with
+command line directives to enable biased locking and parallel gc.
+
+The program uses ~criterium~ to generate sample data and estimate performance,
+including warmup time for the JIT. Upon invocation as an uberjar, the VM
+properties of ~java.runtime.version~ and ~java.vendor~ are prepended to the
+reported benchmark results. 
+
+
+Since I plan to test on Java 8, the uberjar intentionally uses a minor shim
+class for its `-main` entry point to minimize the actual amount of AOT'd
+bytecode, which should amount to a very portable implementation (in case of
+bytecode differences between VM versions). Thus, performance measures will also
+include Clojure loading and evaluating the namespace containing the actual
+benchmark function, and crtierium.
+
+* Summary Data
+
+These are the results of running the sample program via the invocations presented.
+
+
+| OS         | java.runtime.version | java.vendor        | args                                     | Execution Time Mean |
+|------------+----------------------+--------------------+------------------------------------------+---------------------|
+| Windows 10 |        1.8.0_222-b10 | AdoptOpenJDK       |                                          | 712.892795 µs       |
+| Windows 10 |           15+36-1562 | Oracle Corporation |                                          | 1.303109 ms         |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking                    | 1.247518 ms         |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseParallelGC                       | 644.126121 µs       |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking -XX:+UseParallelGC | 636.434973 µs       |
+
+* Reaction
+
+** ParallelGC Matters Most
+ParallelGC seems to be far more important than biased locking here. When we
+compare Java 8 (ParallelGC by default) with Java15 using ParallelGC, the results
+are in the same magnitude, but favor Java 15 (likely by virtue of the benefit of
+modern optimizations accrued by the newer VM). Using the parallel gc seems to be
+about 2x faster here (interesting). I am not versed in GC operations enough to
+understand this seemingly clear 2x result.
+
+** Minor Effect From Biased Locking
+In the pure JDK 15 comparison, using the default G1GC without BiasedLocking is about %5 slower in this microbenchmark.
+
+For this microbench, perhaps the deprecation of BiasedLocking is far less
+impactful for the immediate future of Clojure performance when consuming lazy
+sequences than the choice of GC is. I leave it to the reader to determine if an
+apparent ~5% hit for a microbench is motivation enough to revise the existing
+Clojure implementation. It's unclear how well this holds in the aggregate, such
+as a complex application. Real world measures would be highly informative.
+
+* Commands
+
+#+BEGIN_SRC bash
+1.8.0_222-b10
+AdoptOpenJDK
+Evaluation count : 858 in 6 samples of 143 calls.
+             Execution time mean : 712.892795 µs
+    Execution time std-deviation : 9.912232 µs
+   Execution time lower quantile : 704.348972 µs ( 2.5%)
+   Execution time upper quantile : 728.165580 µs (97.5%)
+                   Overhead used : 2.080576 ns
+#+END_SRC
+
+#+BEGIN_SRC bash
+java -jar test.jar
+
+15+36-1562
+Oracle Corporation
+Evaluation count : 456 in 6 samples of 76 calls.
+Execution time mean : 1.303109 ms
+Execution time std-deviation : 48.579312 µs
+Execution time lower quantile : 1.240604 ms ( 2.5%)
+Execution time upper quantile : 1.358372 ms (97.5%)
+Overhead used : 8.303801 ns
+#+END_SRC
+
+#+BEGIN_SRC bash
+java -XX:+UseBiasedLocking  -jar test.jar
+
+OpenJDK 64-Bit Server VM warning: Option UseBiasedLocking was deprecated in version 15.0 and will likely be removed in a future release.
+15+36-1562
+Oracle Corporation
+Evaluation count : 468 in 6 samples of 78 calls.
+Execution time mean : 1.247518 ms
+Execution time std-deviation : 33.911212 µs
+Execution time lower quantile : 1.213748 ms ( 2.5%)
+Execution time upper quantile : 1.298990 ms (97.5%)
+Overhead used : 8.353547 ns
+#+END_SRC
+
+#+BEGIN_SRC bash
+java -XX:+UseParallelGC  -jar test.jar
+
+15+36-1562
+Oracle Corporation
+Evaluation count : 972 in 6 samples of 162 calls.
+Execution time mean : 644.126121 µs
+Execution time std-deviation : 26.011620 µs
+Execution time lower quantile : 622.838981 µs ( 2.5%)
+Execution time upper quantile : 687.803102 µs (97.5%)
+Overhead used : 2.381432 ns
+
+Found 1 outliers in 6 samples (16.6667 %)
+low-severe       1 (16.6667 %)
+Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
+#+END_SRC
+
+#+BEGIN_SRC bash
+java -XX:+UseBiasedLocking -XX:+UseParallelGC  -jar test.jar
+
+OpenJDK 64-Bit Server VM warning: Option UseBiasedLocking was deprecated in version 15.0 and will likely be removed in a future release.
+15+36-1562
+Oracle Corporation
+Evaluation count : 966 in 6 samples of 161 calls.
+Execution time mean : 636.434973 µs
+Execution time std-deviation : 21.433234 µs
+Execution time lower quantile : 611.987043 µs ( 2.5%)
+Execution time upper quantile : 657.108161 µs (97.5%)
+Overhead used : 2.399232 ns
+#+END_SRC
