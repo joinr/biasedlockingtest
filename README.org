@@ -14,10 +14,24 @@ sequences as a likely indicator of performance regression.
 Rather than speculate, we can go measure. To wit, I put together this small
 project that can be run as an uberjar. The core measurement is just reducing
 over a lazy sequence, arbitarily chosen to be 10^5 entries:
+#+BEGIN_SRC clojure
+(defn seq-range [n]
+  (take n (iterate inc 0)))
+
+(defn seq-smash []
+  (reduce + (seq-range 100000)))
+#+END_SRC
+
+u/alexdmiller pointed out that the original benchmark focused on reduceing over
+a ~seq~ coerced range, but this was faulty since LongRange implements seq
+directly and returns to fast internal reduction path, with no lazy sequences.
+
+To get around this, we generate an equivalent lazy sequence using 
+~take~ and ~iterate~.
 
 #+BEGIN_SRC clojure
-(defn seq-smash []
-  (reduce + (seq (range 100000))))
+user=> (type (take 2 (iterate inc 0)))
+clojure.lang.LazySeq
 #+END_SRC
 
 The eager reduction of the lazy sequence will hopefully provide a useful
@@ -51,43 +65,52 @@ These are the results of running the sample program via the invocations presente
 
 | OS         | java.runtime.version | java.vendor        | args                                     | Execution Time Mean |
 |------------+----------------------+--------------------+------------------------------------------+---------------------|
-| Windows 10 |        1.8.0_222-b10 | AdoptOpenJDK       |                                          | 712.892795 µs       |
-| Windows 10 |           15+36-1562 | Oracle Corporation |                                          | 1.303109 ms         |
-| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking                    | 1.247518 ms         |
-| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseParallelGC                       | 644.126121 µs       |
-| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking -XX:+UseParallelGC | 636.434973 µs       |
+| Windows 10 |        1.8.0_222-b10 | AdoptOpenJDK       |                                          | 8.217622 ms      |
+| Windows 10 |           15+36-1562 | Oracle Corporation |                                          | 15.559892 ms         |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking                    | 15.606927 ms         |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseParallelGC                       | 8.548820 ms       |
+| Windows 10 |           15+36-1562 | Oracle Corporation | -XX:+UseBiasedLocking -XX:+UseParallelGC | 8.619192 ms       |
 
 * Reaction
+
+Despite a different benchmark, the overall observations are the same.
 
 ** ParallelGC Matters Most
 ParallelGC seems to be far more important than biased locking here. When we
 compare Java 8 (ParallelGC by default) with Java15 using ParallelGC, the results
 are in the same magnitude, but favor Java 15 (likely by virtue of the benefit of
 modern optimizations accrued by the newer VM). Using the parallel gc seems to be
-about 2x faster here (interesting). I am not versed in GC operations enough to
+about ~2x (1.895) faster here (interesting). I am not versed in GC operations enough to
 understand this seemingly clear 2x result.
 
 ** Minor Effect From Biased Locking
-In the pure JDK 15 comparison, using the default G1GC without BiasedLocking is about %5 slower in this microbenchmark.
+In the pure JDK 15 comparison, using the default G1GC without BiasedLocking is
+about +%5 slower+ 0.3% faster in this microbenchmark.  There appears to be 
+a minor gain in the new JDK without biased locking, although it's still slower
+than the original Java 8 path with seemingly commensurate options.
 
 For this microbench, perhaps the deprecation of BiasedLocking is far less
 impactful for the immediate future of Clojure performance when consuming lazy
 sequences than the choice of GC is. I leave it to the reader to determine if an
-apparent ~5% hit for a microbench is motivation enough to revise the existing
-Clojure implementation. It's unclear how well this holds in the aggregate, such
-as a complex application. Real world measures would be highly informative.
+apparent +~5% hit+ 0.3% gain matters.  It's unclear how well this holds in the
+aggregate, such as a complex application. Real world measures would be highly
+informative.
 
 * Commands
 
 #+BEGIN_SRC bash
 1.8.0_222-b10
 AdoptOpenJDK
-Evaluation count : 858 in 6 samples of 143 calls.
-             Execution time mean : 712.892795 µs
-    Execution time std-deviation : 9.912232 µs
-   Execution time lower quantile : 704.348972 µs ( 2.5%)
-   Execution time upper quantile : 728.165580 µs (97.5%)
-                   Overhead used : 2.080576 ns
+Evaluation count : 78 in 6 samples of 13 calls.
+             Execution time mean : 8.217622 ms
+    Execution time std-deviation : 115.494655 ╡s
+   Execution time lower quantile : 8.097967 ms ( 2.5%)
+   Execution time upper quantile : 8.386987 ms (97.5%)
+                   Overhead used : 2.073030 ns
+
+Found 1 outliers in 6 samples (16.6667 %)
+        low-severe       1 (16.6667 %)
+ Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
 #+END_SRC
 
 #+BEGIN_SRC bash
@@ -95,12 +118,12 @@ java -jar test.jar
 
 15+36-1562
 Oracle Corporation
-Evaluation count : 456 in 6 samples of 76 calls.
-Execution time mean : 1.303109 ms
-Execution time std-deviation : 48.579312 µs
-Execution time lower quantile : 1.240604 ms ( 2.5%)
-Execution time upper quantile : 1.358372 ms (97.5%)
-Overhead used : 8.303801 ns
+Evaluation count : 42 in 6 samples of 7 calls.
+             Execution time mean : 15.559892 ms
+    Execution time std-deviation : 157.433014 ╡s
+   Execution time lower quantile : 15.368435 ms ( 2.5%)
+   Execution time upper quantile : 15.732033 ms (97.5%)
+                   Overhead used : 8.248577 ns
 #+END_SRC
 
 #+BEGIN_SRC bash
@@ -109,12 +132,17 @@ java -XX:+UseBiasedLocking  -jar test.jar
 OpenJDK 64-Bit Server VM warning: Option UseBiasedLocking was deprecated in version 15.0 and will likely be removed in a future release.
 15+36-1562
 Oracle Corporation
-Evaluation count : 468 in 6 samples of 78 calls.
-Execution time mean : 1.247518 ms
-Execution time std-deviation : 33.911212 µs
-Execution time lower quantile : 1.213748 ms ( 2.5%)
-Execution time upper quantile : 1.298990 ms (97.5%)
-Overhead used : 8.353547 ns
+Evaluation count : 42 in 6 samples of 7 calls.
+             Execution time mean : 15.606927 ms
+    Execution time std-deviation : 704.972726 ╡s
+   Execution time lower quantile : 15.079177 ms ( 2.5%)
+   Execution time upper quantile : 16.798572 ms (97.5%)
+                   Overhead used : 8.333356 ns
+
+Found 1 outliers in 6 samples (16.6667 %)
+        low-severe       1 (16.6667 %)
+ Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
+
 #+END_SRC
 
 #+BEGIN_SRC bash
@@ -122,16 +150,12 @@ java -XX:+UseParallelGC  -jar test.jar
 
 15+36-1562
 Oracle Corporation
-Evaluation count : 972 in 6 samples of 162 calls.
-Execution time mean : 644.126121 µs
-Execution time std-deviation : 26.011620 µs
-Execution time lower quantile : 622.838981 µs ( 2.5%)
-Execution time upper quantile : 687.803102 µs (97.5%)
-Overhead used : 2.381432 ns
-
-Found 1 outliers in 6 samples (16.6667 %)
-low-severe       1 (16.6667 %)
-Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
+Evaluation count : 72 in 6 samples of 12 calls.
+             Execution time mean : 8.548820 ms
+    Execution time std-deviation : 90.448747 ╡s
+   Execution time lower quantile : 8.439539 ms ( 2.5%)
+   Execution time upper quantile : 8.663734 ms (97.5%)
+                   Overhead used : 2.367649 ns
 #+END_SRC
 
 #+BEGIN_SRC bash
@@ -140,10 +164,10 @@ java -XX:+UseBiasedLocking -XX:+UseParallelGC  -jar test.jar
 OpenJDK 64-Bit Server VM warning: Option UseBiasedLocking was deprecated in version 15.0 and will likely be removed in a future release.
 15+36-1562
 Oracle Corporation
-Evaluation count : 966 in 6 samples of 161 calls.
-Execution time mean : 636.434973 µs
-Execution time std-deviation : 21.433234 µs
-Execution time lower quantile : 611.987043 µs ( 2.5%)
-Execution time upper quantile : 657.108161 µs (97.5%)
-Overhead used : 2.399232 ns
+Evaluation count : 72 in 6 samples of 12 calls.
+             Execution time mean : 8.619192 ms
+    Execution time std-deviation : 114.538524 ╡s
+   Execution time lower quantile : 8.477689 ms ( 2.5%)
+   Execution time upper quantile : 8.726289 ms (97.5%)
+                   Overhead used : 2.370110 ns
 #+END_SRC
